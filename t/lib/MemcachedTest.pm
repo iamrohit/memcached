@@ -136,8 +136,6 @@ sub free_port {
 }
 
 sub supports_udp {
-    my $output = `$builddir/memcached-debug -h`;
-    return 0 if $output =~ /^memcached 1\.1\./;
     return 1;
 }
 
