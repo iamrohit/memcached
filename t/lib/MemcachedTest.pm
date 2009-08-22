@@ -12,7 +12,7 @@ use Cwd;
 my $builddir = getcwd;
 
 
-@EXPORT = qw(new_memcached sleep mem_get_is mem_gets mem_gets_is mem_stats free_port);
+@EXPORT = qw(new_memcached sleep mem_get_is mem_gets mem_gets_is mem_stats);
 
 sub sleep {
     my $n = shift;
@@ -87,9 +87,9 @@ sub mem_gets {
     $_ = <$sock>;
     $_ = <$sock>;
 
-    return ($identifier,$val);    
+    return ($identifier,$val);
   }
-  
+
 }
 sub mem_gets_is {
     # works on single-line values only.  no newlines in value.
@@ -121,28 +121,20 @@ sub mem_gets_is {
     }
 }
 
-sub free_port {
-    my $type = shift || "tcp";
-    my $sock;
-    my $port;
-    while (!$sock) {
-        $port = int(rand(20000)) + 30000;
-        $sock = IO::Socket::INET->new(LocalAddr => '127.0.0.1',
-                                      LocalPort => $port,
-                                      Proto     => $type,
-                                      ReuseAddr => 1);
-    }
-    return $port;
-}
-
 sub supports_udp {
     return 1;
 }
 
+sub reaper {
+    wait;
+    $SIG{CHLD} = \&reaper;
+}
+$SIG{CHLD} = \&reaper;
+
 sub new_memcached {
     my ($args, $passed_port) = @_;
-    my $port = $passed_port || free_port();
-    my $udpport = free_port("udp");
+    my $port = $passed_port || -1;
+    my $udpport = -1;
     $args .= " -p $port";
     if (supports_udp()) {
         $args .= " -U $udpport";
@@ -150,16 +142,43 @@ sub new_memcached {
     if ($< == 0) {
         $args .= " -u root";
     }
-    my $childpid = fork();
+
+    my $random = rand();
+    my $portfile = "/tmp/ports.$$.$random";
+    my $env_vars = "MEMCACHED_PORT_FILENAME=$portfile";
 
     my $exe = "$builddir/memcached-debug";
     croak("memcached binary doesn't exist.  Haven't run 'make' ?\n") unless -e $exe;
     croak("memcached binary not executable\n") unless -x _;
 
+    my $childpid = fork();
     unless ($childpid) {
-        exec "$builddir/timedrun 600 $exe $args";
+        my $cmd = "/usr/bin/env $env_vars $builddir/timedrun 600 $exe $args";
+        exec $cmd;
         exit; # never gets here.
     }
+
+    unless ($args =~ /-s (\S+)/) {
+        my $tries = 100;
+        while (($args =~ /-d/ || kill(0, $childpid) == 1) && ! -e $portfile) {
+            select undef, undef, undef, 0.10;
+            if (--$tries == 0) {
+                die("Couldn't ever get the port file.");
+            }
+        }
+
+        open(my $pf, "< $portfile") || die("Could not open $portfile");
+        while(<$pf>) {
+            if (/^TCP INET: (\d+)/) {
+                $port = $1;
+            } elsif (/^UDP INET: (\d+)/) {
+                $udpport = $1;
+            }
+        }
+        close($pf);
+        print "Detected ports:  $port/$udpport\n";
+    }
+    unlink($portfile);
 
     # unix domain sockets
     if ($args =~ /-s (\S+)/) {
@@ -229,9 +248,7 @@ sub new_udp_sock {
                                  PeerPort => $self->{udpport},
                                  Proto    => 'udp',
                                  LocalAddr => '127.0.0.1',
-                                 LocalPort => MemcachedTest::free_port('udp'),
                                  );
-
 }
 
 1;
